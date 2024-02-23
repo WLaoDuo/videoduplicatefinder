@@ -20,6 +20,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Linq;
 using System.Reactive;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using Avalonia;
@@ -162,8 +163,7 @@ namespace VDF.GUI.ViewModels {
 			Scanner.ThumbnailsRetrieved += Scanner_ThumbnailsRetrieved;
 			Scanner.DatabaseCleaned += Scanner_DatabaseCleaned;
 			Scanner.FilesEnumerated += Scanner_FilesEnumerated;
-			var assets = AvaloniaLocator.Current.GetService<IAssetLoader>();
-			Scanner.NoThumbnailImage = SixLabors.ImageSharp.Image.Load(assets!.Open(new Uri("avares://VDF.GUI/Assets/icon.png")));
+			Scanner.NoThumbnailImage = SixLabors.ImageSharp.Image.Load(AssetLoader.Open(new Uri("avares://VDF.GUI/Assets/icon.png")));
 
 			try {
 				File.Delete(Path.Combine(CoreUtils.CurrentFolder, "log.txt"));
@@ -346,7 +346,7 @@ namespace VDF.GUI.ViewModels {
 			view = new DataGridCollectionView(Duplicates);
 			view.GroupDescriptions.Add(new DataGridPathGroupDescription($"{nameof(DuplicateItemVM.ItemInfo)}.{nameof(DuplicateItem.GroupId)}"));
 			view.Filter += DuplicatesFilter;
-			GetDataGrid.Items = view;
+			GetDataGrid.ItemsSource = view;
 			TotalDuplicates = Duplicates.Count;
 			TotalDuplicatesSize = Duplicates.Sum(x => x.ItemInfo.SizeLong).BytesToString();
 			TotalSizeRemovedInternal = 0;
@@ -358,14 +358,16 @@ namespace VDF.GUI.ViewModels {
 
 
 
-		public static ReactiveCommand<Unit, Unit> LatestReleaseCommand => ReactiveCommand.Create(() => {
+		public static ReactiveCommand<Unit, Unit> LatestReleaseCommand => ReactiveCommand.CreateFromTask(async () => {
 			try {
 				Process.Start(new ProcessStartInfo {
 					FileName = "https://github.com/0x90d/videoduplicatefinder/releases",
 					UseShellExecute = true
 				});
 			}
-			catch { }
+			catch {
+				await MessageBoxService.Show("Failed to open URL: https://github.com/0x90d/videoduplicatefinder/releases");
+			}
 		});
 		public static ReactiveCommand<Unit, Unit> OpenOwnFolderCommand => ReactiveCommand.Create(() => {
 			Process.Start(new ProcessStartInfo {
@@ -392,7 +394,7 @@ namespace VDF.GUI.ViewModels {
 		});
 		public static ReactiveCommand<Unit, Unit> ImportDataBaseFromJsonCommand => ReactiveCommand.CreateFromTask(async () => {
 			var result = await Utils.PickerDialogUtils.OpenFilePicker(new FilePickerOpenOptions() {
-				SuggestedStartLocation = new BclStorageFolder(CoreUtils.CurrentFolder),
+				SuggestedStartLocation = await ApplicationHelpers.MainWindow.StorageProvider.TryGetFolderFromPathAsync(CoreUtils.CurrentFolder),
 				FileTypeFilter = new FilePickerFileType[] {
 					 new FilePickerFileType("Json File") { Patterns = new string[] { "*.json" }}}
 			});
@@ -448,7 +450,7 @@ namespace VDF.GUI.ViewModels {
 			});
 			if (string.IsNullOrEmpty(result)) return;
 
-
+			options.Converters.Add(new ImageJsonConverter());
 			try {
 				List<DuplicateItem> list = Duplicates.Select(x => x.ItemInfo).OrderBy(x => x.GroupId).ToList();
 				using var stream = File.OpenWrite(result);
@@ -464,7 +466,7 @@ namespace VDF.GUI.ViewModels {
 		});
 		async Task ExportScanResultsIncludingThumbnails(string? path = null) {
 			path ??= await Utils.PickerDialogUtils.SaveFilePicker(new FilePickerSaveOptions() {
-				SuggestedStartLocation = new BclStorageFolder(CoreUtils.CurrentFolder),
+				SuggestedStartLocation = await ApplicationHelpers.MainWindow.StorageProvider.TryGetFolderFromPathAsync(CoreUtils.CurrentFolder),
 				DefaultExtension = ".json",
 				FileTypeChoices = new FilePickerFileType[] {
 					 new FilePickerFileType("Scan Results") { Patterns = new string[] { "*.scanresults" }}}
@@ -494,7 +496,7 @@ namespace VDF.GUI.ViewModels {
 		}
 		public ReactiveCommand<Unit, Unit> ImportScanResultsFromFileCommand => ReactiveCommand.CreateFromTask(async () => {
 			var result = await Utils.PickerDialogUtils.OpenFilePicker(new FilePickerOpenOptions {
-				SuggestedStartLocation = new BclStorageFolder(CoreUtils.CurrentFolder),
+				SuggestedStartLocation = await ApplicationHelpers.MainWindow.StorageProvider.TryGetFolderFromPathAsync(CoreUtils.CurrentFolder),
 				FileTypeFilter = new FilePickerFileType[] {
 					 new FilePickerFileType("Scan Results") { Patterns = new string[] { "*.scanresults" }}}
 			});
@@ -509,7 +511,7 @@ namespace VDF.GUI.ViewModels {
 
 			if (path == null) {
 				path = await Utils.PickerDialogUtils.OpenFilePicker(new FilePickerOpenOptions() {
-					SuggestedStartLocation = new BclStorageFolder(CoreUtils.CurrentFolder),
+					SuggestedStartLocation = await ApplicationHelpers.MainWindow.StorageProvider.TryGetFolderFromPathAsync(CoreUtils.CurrentFolder),
 					FileTypeFilter = new FilePickerFileType[] {
 					 new FilePickerFileType("Scan Results") { Patterns = new string[] { "*.scanresults" }}}
 				});
@@ -522,6 +524,7 @@ namespace VDF.GUI.ViewModels {
 					IncludeFields = true,
 				};
 				options.Converters.Add(new BitmapJsonConverter());
+				options.Converters.Add(new ImageJsonConverter());
 				IsBusy = true;
 				IsBusyText = "Importing scan results from disk...";
 				List<DuplicateItemVM>? list = await JsonSerializer.DeserializeAsync<List<DuplicateItemVM>>(stream, options);
@@ -712,15 +715,41 @@ namespace VDF.GUI.ViewModels {
 			}
 
 			if (!SettingsFile.Instance.UseNativeFfmpegBinding && !ScanEngine.FFmpegExists) {
-				await MessageBoxService.Show("Cannot find FFmpeg. Please follow instructions on Github and restart VDF");
-				return;
-			}
-			if (!ScanEngine.FFprobeExists) {
-				await MessageBoxService.Show("Cannot find FFprobe. Please follow instructions on Github and restart VDF");
+				if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+					await MessageBoxService.Show("Cannot find FFmpeg executable. The easiest solution is to download ffmpeg and place it in VDF 'bin' folder. Otherwise please follow instructions on Github and restart VDF");
+				}
+				else {
+					await MessageBoxService.Show("Cannot find FFmpeg. Please follow instructions on Github and restart VDF");
+				}
 				return;
 			}
 			if (SettingsFile.Instance.UseNativeFfmpegBinding && !ScanEngine.NativeFFmpegExists) {
-				await MessageBoxService.Show("Cannot find shared FFmpeg libraries. Either uncheck 'Use native ffmpeg binding' in settings or please follow instructions on Github and restart VDF");
+				if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+					if (await MessageBoxService.Show("Cannot find shared FFmpeg libraries. Would you like to open the download page? Otherwise either uncheck 'Use native ffmpeg binding' in settings or please follow instructions on Github and restart VDF.", MessageBoxButtons.Yes | MessageBoxButtons.No) == MessageBoxButtons.Yes) {
+						try {
+							int ffmpegMajorVersion = FFmpeg.AutoGen.ffmpeg.LibraryVersionMap["avcodec"] / 10;
+							Process.Start(new ProcessStartInfo($"https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n{ffmpegMajorVersion}.0-latest-win64-gpl-shared-{ffmpegMajorVersion}.0.zip") {
+								UseShellExecute = true
+							});
+							await MessageBoxService.Show("After downloading, please extract and copy the 'bin' (!!) folder into VDF folder. Then restart VDF");
+						}
+						catch {
+							await MessageBoxService.Show("Failed to open download page. Please visit: https://github.com/BtbN/FFmpeg-Builds/releases");
+						}
+					}
+				}
+				else {
+					await MessageBoxService.Show("Cannot find shared FFmpeg libraries. Either uncheck 'Use native ffmpeg binding' in settings or please follow instructions on Github and restart VDF");
+				}
+				return;
+			}
+			if (!ScanEngine.FFprobeExists) {
+				if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
+					await MessageBoxService.Show("Cannot find FFprobe executable. The easiest solution is to download ffmpeg/ffprobe and place it in VDF 'bin' folder. Otherwise please follow instructions on Github and restart VDF");
+				}
+				else {
+					await MessageBoxService.Show("Cannot find FFprobe. Please follow instructions on Github and restart VDF");
+				}
 				return;
 			}
 			if (SettingsFile.Instance.UseNativeFfmpegBinding && SettingsFile.Instance.HardwareAccelerationMode == Core.FFTools.FFHardwareAccelerationMode.auto) {
@@ -951,8 +980,7 @@ namespace VDF.GUI.ViewModels {
 			}
 #pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
-			await ((IClipboard)AvaloniaLocator.Current.GetService(typeof(IClipboard)))
-				   .SetTextAsync(sb.ToString().TrimEnd(new char[2] { '\r', '\n' }));
+			await (ApplicationHelpers.MainWindow.Clipboard.SetTextAsync(sb.ToString().TrimEnd(new char[2] { '\r', '\n' })));
 #pragma warning restore CS8602 // Dereference of a possibly null reference.
 #pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
 		});
@@ -964,8 +992,7 @@ namespace VDF.GUI.ViewModels {
 			}
 #pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
 #pragma warning disable CS8602 // Dereference of a possibly null reference.
-			await ((IClipboard)AvaloniaLocator.Current.GetService(typeof(IClipboard)))
-				   .SetTextAsync(sb.ToString().TrimEnd(new char[2] { '\r', '\n' }));
+			await (ApplicationHelpers.MainWindow.Clipboard.SetTextAsync(sb.ToString().TrimEnd(new char[2] { '\r', '\n' })));
 #pragma warning restore CS8602 // Dereference of a possibly null reference.
 #pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
 		});
